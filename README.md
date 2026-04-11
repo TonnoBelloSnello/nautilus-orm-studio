@@ -1,6 +1,6 @@
 # Nautilus Studio
 
-Nautilus Studio is a small Next.js admin surface for `nautilus-orm`.
+Nautilus Studio is a small Next.js admin surface for [nautilus](https://github.com/y0gm4/nautilus).
 
 It provides:
 
