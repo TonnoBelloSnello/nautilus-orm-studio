@@ -10,6 +10,8 @@ It provides:
 
 This package is not meant to be installed directly by end users. It is intended to be installed and wired up by the `nautilus-orm` module inside a Nautilus workspace.
 
+> **Warning:** Nautilus Studio provides direct, unauthenticated access to your database. It should **never** be hosted on a publicly accessible URL due to severe security risks. It is designed for local development use only.
+
 ## Local development
 
 This app expects access to:
