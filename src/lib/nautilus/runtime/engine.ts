@@ -3,6 +3,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const BINARY_NAME = process.platform === "win32" ? "nautilus.exe" : "nautilus";
+const NODE_BINARY_NAME = process.platform === "win32" ? "npx.cmd" : "npx";
+const PYTHON_BINARY_NAME = process.platform === "win32" ? "python.exe" : "python";
+
+interface EngineCommand {
+  executable: string;
+  prefixArgs: string[];
+  legacyBinary?: boolean;
+  viaCmdShell?: boolean;
+}
 
 export class EngineProcess {
   private proc: cp.ChildProcessWithoutNullStreams | null = null;
@@ -21,11 +30,23 @@ export class EngineProcess {
     this.stderrChunks.length = 0;
     this.loadDotenv(schemaPath);
 
-    const resolved = this.enginePath ?? this.findEngine(schemaPath);
-    const args = ["engine", "serve", "--schema", schemaPath, ...(this.migrate ? ["--migrate"] : [])];
+    const command = this.enginePath
+      ? this.commandFromExecutable(this.enginePath)
+      : this.findEngine(schemaPath);
+        
+    const args = [
+      ...command.prefixArgs,
+      ...(command.legacyBinary ? [] : ["engine", "serve"]),
+      "--schema",
+      schemaPath,
+      ...(this.migrate ? ["--migrate"] : []),
+    ];
 
-    this.proc = cp.spawn(resolved, args, {
+    const invocation = this.resolveInvocation(command, args);    
+    this.proc = cp.spawn(invocation.executable, invocation.args, {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      env: process.env,
     });
 
     this.proc.stderr.on("data", (chunk: Buffer) => {
@@ -151,13 +172,19 @@ export class EngineProcess {
     const local = this.findWorkspaceBinary(schemaPath);
     if (local) return local;
 
+    const javascript = this.findJavascriptEngine();
+    if (javascript) return javascript;
+
+    const python = this.findPythonEngine();
+    if (python) return python;
+
     const found = this.which(BINARY_NAME);
-    if (found) return found;
+    if (found) return this.commandFromExecutable(found);
 
     throw new Error(
-      "nautilus binary not found in PATH.\n"
-      + "Install it with: cargo install nautilus-cli\n"
-      + "Or add the compiled binary to your PATH before starting Nautilus Studio.",
+      "nautilus engine not found.\n"
+      + "Checked for a native binary, nautilus, npx --no-install nautilus, or python -m nautilus\n"
+      + "Install one of them or add the compiled binary to your PATH before starting Nautilus Studio.",
     );
   }
 
@@ -167,12 +194,50 @@ export class EngineProcess {
         const candidate = path.join(root, "target", buildDir, BINARY_NAME);
         try {
           fs.accessSync(candidate, fs.constants.X_OK);
-          return candidate;
+          return this.commandFromExecutable(candidate);
         } catch {}
       }
     }
 
     return null;
+  }
+
+  private findJavascriptEngine(): EngineCommand | null {
+    const npx = this.which(NODE_BINARY_NAME) ?? NODE_BINARY_NAME;
+    const command = this.commandFromExecutable(npx);
+    return this.canRun(command, ["--no-install", "nautilus", "engine", "serve", "--help"])
+      ? { ...command, prefixArgs: ["--no-install", "nautilus"] }
+      : null;
+  }
+
+  private findPythonEngine(): EngineCommand | null {
+    const python = this.which(PYTHON_BINARY_NAME) ?? PYTHON_BINARY_NAME;
+    
+    try {
+      const script = "import importlib.resources, sys; print(str(importlib.resources.files('nautilus') / ('nautilus.exe' if sys.platform == 'win32' else 'nautilus')))";
+      const result = cp.spawnSync(python, ["-c", script], { encoding: "utf8", timeout: 2000, windowsHide: true });
+      if (result.status === 0 && result.stdout) {
+        const binPath = result.stdout.trim().split(/\r?\n/)[0];
+        if (binPath && fs.existsSync(binPath!)) {
+          return this.commandFromExecutable(binPath!);
+        }
+      }
+    } catch {}
+
+    const command = this.commandFromExecutable(python);
+    return this.canRun(command, ["-m", "nautilus", "engine", "serve", "--help"])
+      ? { ...command, prefixArgs: ["-m", "nautilus"] }
+      : null;
+  }
+
+  private commandFromExecutable(executable: string): EngineCommand {
+    const basename = path.basename(executable).toLowerCase();
+    return {
+      executable,
+      prefixArgs: [],
+      legacyBinary: basename.startsWith("nautilus-engine"),
+      viaCmdShell: process.platform === "win32" && (basename.endsWith(".cmd") || basename.endsWith(".bat")),
+    };
   }
 
   private searchRoots(schemaPath: string) {
@@ -223,5 +288,34 @@ export class EngineProcess {
     }
 
     return null;
+  }
+
+  private canRun(command: EngineCommand, args: string[]) {
+    try {
+      const invocation = this.resolveInvocation(command, args);
+      const result = cp.spawnSync(invocation.executable, invocation.args, {
+        stdio: "ignore",
+        timeout: 5000,
+        windowsHide: true,
+        env: process.env,
+      });
+      return !result.error && result.status === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private resolveInvocation(command: EngineCommand, args: string[]) {
+    if (process.platform === "win32" && command.viaCmdShell) {
+      return {
+        executable: process.env.ComSpec ?? "cmd.exe",
+        args: ["/d", "/c", command.executable, ...args],
+      };
+    }
+
+    return {
+      executable: command.executable,
+      args,
+    };
   }
 }
