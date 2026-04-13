@@ -19,6 +19,7 @@ import type {
   TableDefinition,
   TableView,
 } from "@/lib/nautilus/types";
+import { getSqlDialect } from "@/lib/nautilus/sql";
 import { userVisibleError } from "@/lib/nautilus/utils";
 
 export class AdminError extends Error {}
@@ -33,22 +34,36 @@ export class PartialInlineApplyError extends AdminError {
 }
 
 function quoteIdentifier(identifier: string): string {
-  return `"${identifier.replaceAll('"', '""')}"`;
+  return getSqlDialect().quoteIdentifier(identifier);
 }
 
-function parameterPlaceholder(
-  index: number,
-  column?: ColumnDefinition,
-  options?: { forceText?: boolean },
-): string {
-  const base = `$${index}`;
-  if (options?.forceText) {
-    return `${base}::text`;
+function tableReference(tableName: string): string {
+  return getSqlDialect().tableReference(tableName);
+}
+
+function parameterPlaceholder(index: number): string {
+  return getSqlDialect().parameter(index);
+}
+
+function isPostgresTextLikeColumn(column: ColumnDefinition): boolean {
+  if (getSqlDialect().provider !== "postgresql") {
+    return false;
   }
-  if (column?.kind === "string") {
-    return `${base}::text`;
+
+  if (column.enumValues.length > 0) {
+    return false;
   }
-  return base;
+
+  return ["text", "varchar", "bpchar", "citext", "name"].includes(column.nativeType.toLowerCase());
+}
+
+function parameterExpressionForColumn(column: ColumnDefinition, index: number): string {
+  const placeholder = parameterPlaceholder(index);
+  return isPostgresTextLikeColumn(column) ? `CAST(${placeholder} AS TEXT)` : placeholder;
+}
+
+function textComparisonExpression(expression: string): string {
+  return `LOWER(${getSqlDialect().textCast(expression)})`;
 }
 
 function resolveFilterColumns(table: TableDefinition, filterColumn?: string | null): ColumnDefinition[] {
@@ -121,6 +136,24 @@ function normalizeSqlRecord(table: TableDefinition, record: Record<string, unkno
   return normalized;
 }
 
+async function selectRowByPrimaryKey(
+  table: TableDefinition,
+  delegate: NautilusDelegate,
+  pk: string,
+): Promise<Record<string, unknown> | null> {
+  const params: unknown[] = [];
+  const rows = await delegate.rawStmtQuery(
+    [
+      `SELECT * FROM ${tableReference(table.tableName)}`,
+      `WHERE ${buildPrimaryKeyPredicate(table, pk, params)}`,
+      "LIMIT 1",
+    ].join(" "),
+    params,
+  );
+
+  return rows[0] ? normalizeSqlRecord(table, rows[0]) : null;
+}
+
 function buildPrimaryKeyPredicate(
   table: TableDefinition,
   pk: string,
@@ -132,7 +165,7 @@ function buildPrimaryKeyPredicate(
   const qualifiedName = tableAlias
     ? `${tableAlias}.${quoteIdentifier(primaryKeyColumn.dbName)}`
     : quoteIdentifier(primaryKeyColumn.dbName);
-  return `${qualifiedName} = ${parameterPlaceholder(params.length, primaryKeyColumn)}`;
+  return `${qualifiedName} = ${parameterExpressionForColumn(primaryKeyColumn, params.length)}`;
 }
 
 function buildRawFilterClause(
@@ -149,10 +182,12 @@ function buildRawFilterClause(
 
   const buildPredicate = (column: ColumnDefinition, value: string, operator?: string | null) => {
     const normalizedOperator = normalizeFilterOperator(operator);
+    const columnExpression = `t.${quoteIdentifier(column.dbName)}`;
 
     if (normalizedOperator === "contains") {
       params.push(formatFilterSearchValue(value, normalizedOperator));
-      return `CAST(t.${quoteIdentifier(column.dbName)} AS TEXT) ILIKE ${parameterPlaceholder(params.length, undefined, { forceText: true })}`;
+      const parameterExpression = parameterPlaceholder(params.length);
+      return `${textComparisonExpression(columnExpression)} LIKE ${textComparisonExpression(parameterExpression)}`;
     }
 
     try {
@@ -161,7 +196,7 @@ function buildRawFilterClause(
       return "1=0";
     }
 
-    return `t.${quoteIdentifier(column.dbName)} ${getFilterSqlOperator(normalizedOperator)} ${parameterPlaceholder(params.length, column)}`;
+    return `${columnExpression} ${getFilterSqlOperator(normalizedOperator)} ${parameterExpressionForColumn(column, params.length)}`;
   };
 
   if (isAdvancedFilter(normalized)) {
@@ -238,7 +273,7 @@ async function selectRowsWithRawSql(
   const delegate = await getFirstDelegate();
   const params: unknown[] = [];
   const sqlParts = [
-    `SELECT * FROM ${quoteIdentifier("public")}.${quoteIdentifier(table.tableName)} AS t`,
+    `SELECT * FROM ${tableReference(table.tableName)} AS t`,
   ];
 
   const whereClause = buildRawFilterClause(
@@ -256,11 +291,11 @@ async function selectRowsWithRawSql(
 
   if (options.take !== undefined) {
     params.push(options.take);
-    sqlParts.push(`LIMIT $${params.length}`);
+    sqlParts.push(`LIMIT ${parameterPlaceholder(params.length)}`);
   }
   if (options.skip !== undefined) {
     params.push(options.skip);
-    sqlParts.push(`OFFSET $${params.length}`);
+    sqlParts.push(`OFFSET ${parameterPlaceholder(params.length)}`);
   }
 
   const rows = await delegate.rawStmtQuery(sqlParts.join(" "), params);
@@ -277,7 +312,7 @@ async function countRowsWithRawSql(
 ): Promise<number> {
   const params: unknown[] = [];
   const sqlParts = [
-    `SELECT COUNT(*) AS total_rows FROM ${quoteIdentifier("public")}.${quoteIdentifier(table.tableName)} AS t`,
+    `SELECT COUNT(*) AS total_rows FROM ${tableReference(table.tableName)} AS t`,
   ];
   const whereClause = buildRawFilterClause(
     table,
@@ -484,6 +519,7 @@ function buildRawUpdateStatement(
   table: TableDefinition,
   pk: string,
   payload: Record<string, unknown>,
+  options?: { includeReturning?: boolean },
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const assignments: string[] = [];
@@ -495,7 +531,7 @@ function buildRawUpdateStatement(
 
     params.push(payload[column.name]);
     assignments.push(
-      `${quoteIdentifier(column.dbName)} = ${parameterPlaceholder(params.length, column)}`,
+      `${quoteIdentifier(column.dbName)} = ${parameterExpressionForColumn(column, params.length)}`,
     );
   }
 
@@ -505,10 +541,10 @@ function buildRawUpdateStatement(
 
   return {
     sql: [
-      `UPDATE ${quoteIdentifier("public")}.${quoteIdentifier(table.tableName)}`,
+      `UPDATE ${tableReference(table.tableName)}`,
       `SET ${assignments.join(", ")}`,
       `WHERE ${buildPrimaryKeyPredicate(table, pk, params)}`,
-      "RETURNING *",
+      ...(options?.includeReturning === false ? [] : ["RETURNING *"]),
     ].join(" "),
     params,
   };
@@ -517,6 +553,7 @@ function buildRawUpdateStatement(
 function buildRawInsertStatement(
   table: TableDefinition,
   payload: Record<string, unknown>,
+  options?: { includeReturning?: boolean },
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const columnNames: string[] = [];
@@ -529,7 +566,7 @@ function buildRawInsertStatement(
 
     params.push(payload[column.name]);
     columnNames.push(quoteIdentifier(column.dbName));
-    values.push(parameterPlaceholder(params.length, column));
+    values.push(parameterExpressionForColumn(column, params.length));
   }
 
   if (columnNames.length === 0) {
@@ -538,13 +575,47 @@ function buildRawInsertStatement(
 
   return {
     sql: [
-      `INSERT INTO ${quoteIdentifier("public")}.${quoteIdentifier(table.tableName)}`,
+      `INSERT INTO ${tableReference(table.tableName)}`,
       `(${columnNames.join(", ")})`,
       `VALUES (${values.join(", ")})`,
-      "RETURNING *",
+      ...(options?.includeReturning === false ? [] : ["RETURNING *"]),
     ].join(" "),
     params,
   };
+}
+
+async function resolveInsertedPrimaryKeyValue(
+  table: TableDefinition,
+  delegate: NautilusDelegate,
+  payload: Record<string, unknown>,
+): Promise<string> {
+  const primaryKeyColumn = requirePrimaryKeyColumn(table);
+  const providedPrimaryKey = payload[primaryKeyColumn.name];
+
+  if (providedPrimaryKey !== undefined && providedPrimaryKey !== null) {
+    return String(providedPrimaryKey);
+  }
+
+  if (getSqlDialect().provider !== "mysql") {
+    throw new UnsupportedTableError(
+      `${table.displayName} inserts require a retrievable primary key value.`,
+    );
+  }
+
+  if (primaryKeyColumn.kind !== "int") {
+    throw new UnsupportedTableError(
+      `${table.displayName} inserts require an explicit primary key when using MySQL.`,
+    );
+  }
+
+  const rows = await delegate.rawStmtQuery("SELECT LAST_INSERT_ID() AS inserted_id");
+  const insertedId = rows[0]?.inserted_id;
+
+  if (insertedId === undefined || insertedId === null) {
+    throw new RecordNotFoundError(`Insert into ${table.displayName} could not determine the new primary key.`);
+  }
+
+  return String(insertedId);
 }
 
 async function executeUpdateRow(
@@ -554,14 +625,25 @@ async function executeUpdateRow(
   formData: FormData,
 ): Promise<Record<string, unknown>> {
   const payload = extractFormPayload(table, formData);
-  const { sql, params } = buildRawUpdateStatement(table, pk, payload);
+  const { sql, params } = buildRawUpdateStatement(table, pk, payload, {
+    includeReturning: getSqlDialect().supportsReturning,
+  });
   const rows = await delegate.rawStmtQuery(sql, params);
 
-  if (rows.length === 0) {
+  if (getSqlDialect().supportsReturning) {
+    if (rows.length === 0) {
+      throw new RecordNotFoundError(`Record ${JSON.stringify(pk)} was not found.`);
+    }
+
+    return normalizeSqlRecord(table, rows[0]);
+  }
+
+  const record = await selectRowByPrimaryKey(table, delegate, pk);
+  if (!record) {
     throw new RecordNotFoundError(`Record ${JSON.stringify(pk)} was not found.`);
   }
 
-  return normalizeSqlRecord(table, rows[0]);
+  return record;
 }
 
 export async function listRows(
@@ -612,22 +694,12 @@ export async function getRow(
   pk: string,
 ): Promise<Record<string, unknown>> {
   const { table, delegate } = await getSupportedTable(tableName);
-  const params: unknown[] = [];
-  const rows = await delegate.rawStmtQuery(
-    [
-      `SELECT * FROM ${quoteIdentifier("public")}.${quoteIdentifier(table.tableName)}`,
-      `WHERE ${buildPrimaryKeyPredicate(table, pk, params)}`,
-      "LIMIT 1",
-    ].join(" "),
-    params,
-  );
-  const record = rows[0];
-
+  const record = await selectRowByPrimaryKey(table, delegate, pk);
   if (!record) {
     throw new RecordNotFoundError(`${table.displayName} record ${JSON.stringify(pk)} was not found.`);
   }
 
-  return normalizeSqlRecord(table, record);
+  return record;
 }
 
 export async function createRow(
@@ -636,14 +708,27 @@ export async function createRow(
 ): Promise<Record<string, unknown>> {
   const { table, delegate } = await getSupportedTable(tableName);
   const payload = extractFormPayload(table, formData);
-  const { sql, params } = buildRawInsertStatement(table, payload);
+  const { sql, params } = buildRawInsertStatement(table, payload, {
+    includeReturning: getSqlDialect().supportsReturning,
+  });
   const rows = await delegate.rawStmtQuery(sql, params);
 
-  if (rows.length === 0) {
+  if (getSqlDialect().supportsReturning) {
+    if (rows.length === 0) {
+      throw new RecordNotFoundError(`Insert into ${table.displayName} returned no rows.`);
+    }
+
+    return normalizeSqlRecord(table, rows[0]);
+  }
+
+  const insertedPk = await resolveInsertedPrimaryKeyValue(table, delegate, payload);
+  const record = await selectRowByPrimaryKey(table, delegate, insertedPk);
+
+  if (!record) {
     throw new RecordNotFoundError(`Insert into ${table.displayName} returned no rows.`);
   }
 
-  return normalizeSqlRecord(table, rows[0]);
+  return record;
 }
 
 export async function updateRow(
@@ -705,10 +790,28 @@ export async function deleteRow(
   pk: string,
 ): Promise<Record<string, unknown> | null> {
   const { table, delegate } = await getSupportedTable(tableName);
+  if (!getSqlDialect().supportsReturning) {
+    const existing = await selectRowByPrimaryKey(table, delegate, pk);
+    if (!existing) {
+      return null;
+    }
+
+    const params: unknown[] = [];
+    await delegate.rawStmtQuery(
+      [
+        `DELETE FROM ${tableReference(table.tableName)}`,
+        `WHERE ${buildPrimaryKeyPredicate(table, pk, params)}`,
+      ].join(" "),
+      params,
+    );
+
+    return existing;
+  }
+
   const params: unknown[] = [];
   const rows = await delegate.rawStmtQuery(
     [
-      `DELETE FROM ${quoteIdentifier("public")}.${quoteIdentifier(table.tableName)}`,
+      `DELETE FROM ${tableReference(table.tableName)}`,
       `WHERE ${buildPrimaryKeyPredicate(table, pk, params)}`,
       "RETURNING *",
     ].join(" "),

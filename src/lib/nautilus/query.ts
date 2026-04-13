@@ -4,14 +4,6 @@ import { getFirstDelegate } from "@/lib/nautilus/client";
 import type { RawQueryView } from "@/lib/nautilus/types";
 import { userVisibleError } from "@/lib/nautilus/utils";
 
-function normalizeRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  return rows.map((row) => Object.fromEntries(Object.entries(row)));
-}
-
-function collectColumns(rows: Record<string, unknown>[]): string[] {
-  return Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
-}
-
 export async function runRawQuery(
   sql: string,
 ): Promise<RawQueryView> {
@@ -30,11 +22,11 @@ export async function runRawQuery(
   }
 
   try {
-    const rows = normalizeRows(await delegate.rawQuery(normalizedSql));
+    const rows = await delegate.rawQuery(normalizedSql);
     return {
       sql: normalizedSql,
       rows,
-      columns: collectColumns(rows),
+      columns: Array.from(new Set(rows.flatMap((row) => Object.keys(row)))),
       rowCount: rows.length,
       submitted: true,
       errorMessage: null,

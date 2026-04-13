@@ -8,13 +8,6 @@ export function slugifyTableName(name: string): string {
   return slug.replace(/^_+|_+$/g, "");
 }
 
-export function toLowerCamelCase(name: string): string {
-  if (!name) {
-    return name;
-  }
-  return name[0].toLowerCase() + name.slice(1);
-}
-
 export function titleize(name: string): string {
   if (name.toUpperCase() === "ID") {
     return "ID";
@@ -57,17 +50,41 @@ export function isAutoUpdateColumn(name: string): boolean {
 export function inferValueKind(udtName: string): ValueKind {
   const normalized = udtName.toLowerCase();
 
-  if (["int2", "int4", "int8", "serial", "serial4", "serial8"].includes(normalized)) return "int";
-  if (["float4", "float8"].includes(normalized)) return "float";
-  if (["numeric", "decimal", "money"].includes(normalized)) return "decimal";
-  if (normalized === "bool") return "boolean";
-  if (normalized === "date") return "date";
-  if (["timestamp", "timestamptz"].includes(normalized)) return "datetime";
-  if (["time", "timetz"].includes(normalized)) return "time";
-  if (normalized === "uuid") return "uuid";
-  if (normalized.startsWith("_"))return "list";
+  if (normalized.startsWith("_") || normalized.endsWith("[]")) return "list";
   if (["json", "jsonb"].includes(normalized)) return "json";
-  
+  if (normalized === "uuid") return "uuid";
+  if (["date"].includes(normalized)) return "date";
+  if (["datetime", "timestamp", "timestamptz"].includes(normalized)) return "datetime";
+  if (["time", "timetz"].includes(normalized)) return "time";
+  if (["bool", "boolean", "tinyint(1)"].includes(normalized)) return "boolean";
+  if (
+    [
+      "int",
+      "integer",
+      "int2",
+      "int4",
+      "int8",
+      "serial",
+      "serial4",
+      "serial8",
+      "smallint",
+      "mediumint",
+      "bigint",
+      "tinyint",
+    ].includes(normalized)
+  ) return "int";
+  if (["float", "float4", "float8", "double", "double precision", "real"].includes(normalized)) return "float";
+  if (["numeric", "decimal", "money"].includes(normalized)) return "decimal";
+
+  if (normalized.includes("int")) return "int";
+  if (normalized.includes("double") || normalized.includes("float") || normalized.includes("real")) return "float";
+  if (normalized.includes("decimal") || normalized.includes("numeric")) return "decimal";
+  if (normalized.includes("bool")) return "boolean";
+  if (normalized.includes("datetime") || normalized.includes("timestamp")) return "datetime";
+  if (normalized === "date" || normalized.startsWith("date ")) return "date";
+  if (normalized.startsWith("time")) return "time";
+  if (normalized.includes("json")) return "json";
+
   return "string";
 }
 

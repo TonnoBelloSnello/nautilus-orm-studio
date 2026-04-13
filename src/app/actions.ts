@@ -23,12 +23,6 @@ function actionErrorMessage(error: unknown): string {
   return error instanceof AdminError ? error.message : userVisibleError(error);
 }
 
-function formDataToValues(formData: FormData): Record<string, string> {
-  return Object.fromEntries(
-    Array.from(formData.entries(), ([key, value]) => [key, String(value)]),
-  );
-}
-
 function buildTableUrl(
   tableSlug: string,
   searchParamsStr: string,
@@ -53,7 +47,9 @@ async function runRowAction(
   } catch (error) {
     return {
       errorMessage: actionErrorMessage(error),
-      values: formDataToValues(formData),
+      values: Object.fromEntries(
+        Array.from(formData.entries(), ([key, value]) => [key, String(value)]),
+      ),
     };
   }
 
@@ -127,7 +123,9 @@ export async function deleteRowAction(
   pk: string,
   searchParamsStr: string,
 ): Promise<void> {
-  return redirectAfterMutation(tableSlug, searchParamsStr, () => deleteRow(tableSlug, pk).then(() => undefined));
+  return redirectAfterMutation(tableSlug, searchParamsStr, async () => {
+    await deleteRow(tableSlug, pk);
+  });
 }
 
 export async function runRawQueryAction(

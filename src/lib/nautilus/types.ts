@@ -11,6 +11,8 @@ export type ValueKind =
   | "list"
   | "json";
 
+export type DatabaseProvider = "postgresql" | "sqlite" | "mysql";
+
 export type InputType =
   | "text"
   | "email"
@@ -32,6 +34,7 @@ export interface RelationDefinition {
 export interface ColumnDefinition {
   name: string;
   dbName: string;
+  nativeType: string;
   label: string;
   kind: ValueKind;
   enumValues: string[];
